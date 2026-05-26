@@ -9,8 +9,12 @@ import pandas_ta as ta
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# ปรับสัญลักษณ์ให้ตรงกับรูปแบบคู่เทรด Spot ของ OKX (เปลี่ยนจาก -USD เป็น -USDT)
-WATCHLIST = ["BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", "XRP-USDT", "EIGEN-USDT", "FLOKI-USDT", "NEAR-USDT", "OP-USDT", "ADA-USDT", "SHIB-USDT", "DOGE-USDT"]
+# รายชื่อเหรียญที่ต้องการสแกน (ใช้รูปแบบคู่เทรด Spot ของ OKX)
+WATCHLIST = [
+    "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", 
+    "XRP-USDT", "EIGEN-USDT", "FLOKI-USDT", "NEAR-USDT", 
+    "OP-USDT", "ADA-USDT", "SHIB-USDT", "DOGE-USDT"
+]
 
 def send_telegram_message(text_msg):
     """ ฟังก์ชันส่งข้อความไปยัง Telegram ด้วยรูปแบบ HTML """
@@ -23,7 +27,7 @@ def send_telegram_message(text_msg):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text_msg,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True # ปิดพรีวิวลิงก์เผื่อมีสัญลักษณ์แปลกๆ
+        "disable_web_page_preview": True  # ปิดพรีวิวลิงก์เผื่อมีสัญลักษณ์แปลกๆ
     }
     
     try:
@@ -35,34 +39,48 @@ def send_telegram_message(text_msg):
     except Exception as e:
         print(f"Exception while sending Telegram message: {e}")
 
-def get_historical_data_okx(symbol, interval="1H"):
-    """ ดึงข้อมูลแท่งเทียนย้อนหลังโดยตรงจาก OKX API (Public) """
+def get_historical_data_okx(symbol, interval="1h"):
+    """ ดึงข้อมูลแท่งเทียนย้อนหลัง 300 แท่งจาก OKX API เพื่อให้เพียงพอต่อการคำนวณ EMA200 """
     try:
-        # ปรับค่าแกนเวลาให้เข้ากับ API ของ OKX (เช่น 1h ของเดิม ใน OKX จะใช้ 1H ตัวใหญ่)
+        # ปรับค่าแกนเวลาให้เข้ากับ API ของ OKX (1h -> 1H)
         bar_mapping = {"1h": "1H", "4h": "4H", "1d": "1D"}
         okx_interval = bar_mapping.get(interval, "1H")
         
-        # OKX REST API v5 สำหรับดึงข้อมูล Candlesticks (จำกัดสูงสุด 100 แท่งต่อครั้ง เพียงพอสำหรับคำนวณ EMA200 / RSI)
-        url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={okx_interval}&limit=100"
+        all_candles = []
+        after_ts = ""  # พารามิเตอร์สำหรับดึงข้อมูลแท่งเทียนที่เก่ากว่าชุดแรก
         
-        response = requests.get(url, timeout=10)
-        data = response.json()
+        # วนลูป 3 รอบ รอบละ 100 แท่ง เพื่อรวมให้ได้ข้อมูล 300 แท่งย้อนหลัง
+        for _ in range(3):
+            url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={okx_interval}&limit=100"
+            if after_ts:
+                url += f"&after={after_ts}"
+                
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            
+            if data.get("code") != "0" or not data.get("data"):
+                break
+                
+            candles = data["data"]
+            all_candles.extend(candles)
+            
+            if len(candles) < 100:
+                break
+                
+            # ใช้ Timestamp ของแท่งสุดท้ายในเซ็ตปัจจุบัน เพื่อไปดึงแท่งที่เก่ากว่าในลูปรอบถัดไป
+            after_ts = candles[-1][0]
         
-        if data.get("code") != "0" or not data.get("data"):
-            print(f"Error fetching data from OKX for {symbol}: {data.get('msg')}")
+        if not all_candles:
             return None
             
-        # ข้อมูลจาก OKX เรียงจาก "ใหม่ไปเก่า" [0] คือแท่งปัจจุบัน
-        # โครงสร้าง: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
-        raw_candles = data["data"]
+        # แปลงเป็น DataFrame (โครงสร้าง OKX: [ts, open, high, low, close, volume, ...])
+        df = pd.DataFrame(all_candles, columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
         
-        df = pd.DataFrame(raw_candles, columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
-        
-        # แปลงชนิดข้อมูลให้เป็นตัวเลข (Float)
+        # แปลงข้อมูลชนิดข้อความ (String) ให้กลายเป็นตัวเลข (Float)
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col])
             
-        # กลับด้าน DataFrame ให้ "เก่าไปใหม่" เพื่อใช้คำนวณ Indicator ได้ถูกต้อง
+        # กลับด้าน DataFrame จาก "ใหม่ไปเก่า" ให้กลายเป็น "เก่าไปใหม่" เพื่อการคำนวณอินดิเคเตอร์ที่ถูกต้อง
         df = df.iloc[::-1].reset_index(drop=True)
         return df
         
@@ -110,11 +128,11 @@ def screen_crypto():
         display_name = symbol.replace("-", "_")
         print(f"Scanning {display_name}...")
         
-        # เรียกใช้งานฟังก์ชันที่เปลี่ยนเป็น OKX
         df = get_historical_data_okx(symbol, interval="1h")
         if df is None or df.empty:
             continue
             
+        # คำนวณเทคนิคอลอินดิเคเตอร์
         df["EMA_50"] = ta.ema(df["close"], length=50)
         df["EMA_200"] = ta.ema(df["close"], length=200)
         df["RSI"] = ta.rsi(df["close"], length=14)
@@ -136,7 +154,6 @@ def screen_crypto():
         # -------------------------------------------------------------------------
         # 1. เช็กแนวโน้มรายเหรียญ (ตามเกณฑ์เหนือ/ใต้เส้น EMA200)
         # -------------------------------------------------------------------------
-        # ใส่เงื่อนไขดักกรณีที่แท่งเทียนมีไม่ถึง 200 วัน ทำให้ไม่มีค่า EMA_200 ป้องกันโค้ดพัง
         if pd.isna(last_ema200_usd):
             coin_trend = "⚪ ข้อมูลไม่พอคำนวณเทรนด์"
         elif last_close_usd > last_ema200_usd:
@@ -145,30 +162,34 @@ def screen_crypto():
         else:
             coin_trend = "🔴 ขาลง"
             
-        # ปรับแก้การจัดรูปแบบทศนิยมให้ยืดหยุ่น (รองรับเหรียญมีมราคาต่ำๆ เช่น FLOKI, SHIB)
-        if last_close_usd < 0.01:
+        # ปรับรูปแบบการแสดงผลทศนิยมตามมูลค่าเหรียญ (ดักแก้ปัญหาราคาเหรียญมีมเพี้ยน)
+        if last_close_usd < 0.001:
             price_format = f"${last_close_usd:,.6f}"
-        else:
+        elif last_close_usd < 1:
             price_format = f"${last_close_usd:,.4f}"
+        else:
+            price_format = f"${last_close_usd:,.2f}"
             
-        # ตรวจสอบค่า RSI เผื่อกรณีค่าเป็น NaN
         rsi_str = f"{last_rsi:.1f}" if not pd.isna(last_rsi) else "N/A"
             
         coin_summaries.append(f"• <b>{display_name}</b>: {price_format} ({coin_trend} | RSI: {rsi_str})")
         
-        # หากคำนวณข้อมูลชี้วัดไม่สมบูรณ์ ข้ามกระบวนการส่งสัญญาณไปก่อน
+        # ป้องกันกรณีอินดิเคเตอร์คำนวณได้ค่าว่าง
         if pd.isna(last_rsi) or pd.isna(prev_rsi):
             continue
 
         # -------------------------------------------------------------------------
         # 2. คัดกรองสัญญาณเทรด (RSI Signals)
         # -------------------------------------------------------------------------
-        # 🟢 เงื่อนไขเข้าซื้อ
+        # 🟢 เงื่อนไขเข้าซื้อ (RSI ตัดลงต่ำกว่าหรือเท่ากับ 35)
         if last_rsi <= 35 and prev_rsi > 35:
             is_bull_div = check_bullish_divergence(df)
-            buy_zone = f"{last_close_usd:,.4f} - {(last_close_usd * 0.98):,.4f}" if last_close_usd >= 0.01 else f"{last_close_usd:,.6f}"
-            take_profit = f"{(last_close_usd * 1.05):,.4f}" if last_close_usd >= 0.01 else f"{(last_close_usd * 1.05):,.6f}"
-            stop_loss = f"{(last_close_usd * 0.95):,.4f}" if last_close_usd >= 0.01 else f"{(last_close_usd * 0.95):,.6f}"
+            
+            # กำหนดรูปแบบทศนิยมโซนซื้อขายตามราคาเหรียญ
+            fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
+            buy_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 0.98, fmt)}"
+            take_profit = f"{format(last_close_usd * 1.05, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
+            stop_loss = f"{format(last_close_usd * 0.95, fmt)}"
             
             status_context = "📉 RSI Oversold"
             if not pd.isna(last_ema200_usd):
@@ -192,12 +213,14 @@ def screen_crypto():
             )
             signals.append(msg)
             
-        # 🔴 เงื่อนไขเตือนขาย
+        # 🔴 เงื่อนไขเตือนขาย (RSI ตัดขึ้นสูงกว่าหรือเท่ากับ 65)
         elif last_rsi >= 65 and prev_rsi < 65:
             is_bear_div = check_bearish_divergence(df)
-            sell_zone = f"{last_close_usd:,.4f} - {(last_close_usd * 1.02):,.4f}" if last_close_usd >= 0.01 else f"{last_close_usd:,.6f}"
-            re_entry_zone = f"{(last_close_usd * 0.95):,.4f}" if last_close_usd >= 0.01 else f"{(last_close_usd * 0.95):,.6f}"
-            trailing_stop = f"{(last_close_usd * 0.97):,.4f}" if last_close_usd >= 0.01 else f"{(last_close_usd * 0.97):,.6f}"
+            
+            fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
+            sell_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 1.02, fmt)}"
+            re_entry_zone = f"{format(last_close_usd * 0.95, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
+            trailing_stop = f"{format(last_close_usd * 0.97, fmt)}"
             
             status_context = "⚠️ RSI Overbought (ซื้อมากเกินไป)"
             if not pd.isna(last_ema200_usd):
