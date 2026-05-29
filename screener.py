@@ -9,15 +9,25 @@ import pandas_ta as ta
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# รายชื่อเหรียญที่ต้องการสแกน (ใช้รูปแบบคู่เทรด Spot ของ OKX)
 WATCHLIST = [
     "BTC-USDT", "ETH-USDT", "BNB-USDT", "SOL-USDT", 
     "XRP-USDT", "EIGEN-USDT", "FLOKI-USDT", "NEAR-USDT", 
     "OP-USDT", "ADA-USDT", "SHIB-USDT", "DOGE-USDT"
 ]
 
+def get_coin_tier(symbol):
+    """ แยก Tier ของเหรียญเพื่อกำหนดเปอร์เซ็นต์ Take Profit """
+    tier_mapping = {
+        "BTC-USDT": (1, 0.08), "ETH-USDT": (1, 0.08),  # Tier 1: TP 8%
+        "BNB-USDT": (2, 0.12), "SOL-USDT": (2, 0.12), "XRP-USDT": (2, 0.12),
+        "NEAR-USDT": (2, 0.12), "OP-USDT": (2, 0.12), "ADA-USDT": (2, 0.12),
+        "EIGEN-USDT": (2, 0.12),  # Tier 2: TP 12%
+        "FLOKI-USDT": (3, 0.18), "SHIB-USDT": (3, 0.18), "DOGE-USDT": (3, 0.18)  # Tier 3: TP 18%
+    }
+    return tier_mapping.get(symbol, (2, 0.12))
+
 def send_telegram_message(text_msg):
-    """ ฟังก์ชันส่งข้อความไปยัง Telegram ด้วยรูปแบบ HTML """
+    """ ฟังก์ชันส่งข้อความไปยัง Telegram """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Error: Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.")
         return
@@ -27,117 +37,86 @@ def send_telegram_message(text_msg):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text_msg,
         "parse_mode": "HTML",
-        "disable_web_page_preview": True  # ปิดพรีวิวลิงก์เผื่อมีสัญลักษณ์แปลกๆ
+        "disable_web_page_preview": True
     }
-    
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print("Successfully sent message via Telegram Bot.")
-        else:
-            print(f"Failed to send Telegram message: {response.status_code} - {response.text}")
+        if response.status_code != 200:
+            print(f"Failed to send Telegram message: {response.status_code}")
     except Exception as e:
         print(f"Exception while sending Telegram message: {e}")
 
 def get_historical_data_okx(symbol, interval="1h"):
-    """ ดึงข้อมูลแท่งเทียนย้อนหลัง 300 แท่งจาก OKX API เพื่อให้เพียงพอต่อการคำนวณ EMA200 """
     try:
-        # ปรับค่าแกนเวลาให้เข้ากับ API ของ OKX (1h -> 1H)
         bar_mapping = {"1h": "1H", "4h": "4H", "1d": "1D"}
         okx_interval = bar_mapping.get(interval, "1H")
-        
         all_candles = []
-        after_ts = ""  # พารามิเตอร์สำหรับดึงข้อมูลแท่งเทียนที่เก่ากว่าชุดแรก
+        after_ts = ""
         
-        # วนลูป 3 รอบ รอบละ 100 แท่ง เพื่อรวมให้ได้ข้อมูล 300 แท่งย้อนหลัง
         for _ in range(3):
             url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={okx_interval}&limit=100"
             if after_ts:
                 url += f"&after={after_ts}"
-                
             response = requests.get(url, timeout=10)
             data = response.json()
-            
             if data.get("code") != "0" or not data.get("data"):
                 break
-                
             candles = data["data"]
             all_candles.extend(candles)
-            
             if len(candles) < 100:
                 break
-                
-            # ใช้ Timestamp ของแท่งสุดท้ายในเซ็ตปัจจุบัน เพื่อไปดึงแท่งที่เก่ากว่าในลูปรอบถัดไป
             after_ts = candles[-1][0]
-        
+            
         if not all_candles:
             return None
-            
-        # แปลงเป็น DataFrame (โครงสร้าง OKX: [ts, open, high, low, close, volume, ...])
         df = pd.DataFrame(all_candles, columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
-        
-        # แปลงข้อมูลชนิดข้อความ (String) ให้กลายเป็นตัวเลข (Float)
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col])
-            
-        # กลับด้าน DataFrame จาก "ใหม่ไปเก่า" ให้กลายเป็น "เก่าไปใหม่" เพื่อการคำนวณอินดิเคเตอร์ที่ถูกต้อง
-        df = df.iloc[::-1].reset_index(drop=True)
-        return df
-        
+        return df.iloc[::-1].reset_index(drop=True)
     except Exception as e:
-        print(f"Exception fetching {symbol} from OKX: {e}")
+        print(f"Exception fetching {symbol}: {e}")
         return None
 
 def check_bullish_divergence(df):
-    if len(df) < 20:
-        return False
+    if len(df) < 20: return False
     current_close = df["close"].iloc[-1]
     current_rsi = df["RSI"].iloc[-1]
     lookback_df = df.iloc[-15:-3]
     lowest_price_idx = lookback_df["close"].idxmin()
     older_close = df["close"].loc[lowest_price_idx]
     older_rsi = df["RSI"].loc[lowest_price_idx]
-    
-    if current_close < older_close and current_rsi > older_rsi and current_rsi < 45:
-        return True
-    return False
+    return current_close < older_close and current_rsi > older_rsi and current_rsi < 45
 
 def check_bearish_divergence(df):
-    if len(df) < 20:
-        return False
+    if len(df) < 20: return False
     current_close = df["close"].iloc[-1]
     current_rsi = df["RSI"].iloc[-1]
     lookback_df = df.iloc[-15:-3]
     highest_price_idx = lookback_df["close"].idxmax()
     older_close = df["close"].loc[highest_price_idx]
     older_rsi = df["RSI"].loc[highest_price_idx]
-    
-    if current_close > older_close and current_rsi < older_rsi and current_rsi > 55:
-        return True
-    return False
+    return current_close > older_close and current_rsi < older_rsi and current_rsi > 55
 
 def screen_crypto():
-    print("🚀 Starting Crypto Screener [Engine: OKX Spot API]...")
+    print("🚀 Starting Crypto Screener [Smart Report Mode]...")
     
-    signals = []
+    signal_sent_count = 0
     coin_summaries = []
     bullish_count = 0
     total_coins = 0
     
     for symbol in WATCHLIST:
         display_name = symbol.replace("-", "_")
-        print(f"Scanning {display_name}...")
-        
         df = get_historical_data_okx(symbol, interval="1h")
         if df is None or df.empty:
             continue
             
-        # คำนวณเทคนิคอลอินดิเคเตอร์
+        # คำนวณอินดิเคเตอร์
         df["EMA_50"] = ta.ema(df["close"], length=50)
         df["EMA_200"] = ta.ema(df["close"], length=200)
         df["RSI"] = ta.rsi(df["close"], length=14)
         
-        if len(df) < 2:
+        if len(df) < 3:
             continue
             
         last_row = df.iloc[-1]
@@ -149,131 +128,118 @@ def screen_crypto():
         last_ema50_usd = last_row["EMA_50"]
         last_ema200_usd = last_row["EMA_200"]
         
-        total_coins += 1
-        
-        # -------------------------------------------------------------------------
-        # 1. เช็กแนวโน้มรายเหรียญ (ตามเกณฑ์เหนือ/ใต้เส้น EMA200)
-        # -------------------------------------------------------------------------
-        if pd.isna(last_ema200_usd):
-            coin_trend = "⚪ ข้อมูลไม่พอคำนวณเทรนด์"
-        elif last_close_usd > last_ema200_usd:
-            coin_trend = "🟢 ขาขึ้น"
-            bullish_count += 1
-        else:
-            coin_trend = "🔴 ขาลง"
-            
-        # ปรับรูปแบบการแสดงผลทศนิยมตามมูลค่าเหรียญ (ดักแก้ปัญหาราคาเหรียญมีมเพี้ยน)
-        if last_close_usd < 0.001:
-            price_format = f"${last_close_usd:,.6f}"
-        elif last_close_usd < 1:
-            price_format = f"${last_close_usd:,.4f}"
-        else:
-            price_format = f"${last_close_usd:,.2f}"
-            
-        rsi_str = f"{last_rsi:.1f}" if not pd.isna(last_rsi) else "N/A"
-            
-        coin_summaries.append(f"• <b>{display_name}</b>: {price_format} ({coin_trend} | RSI: {rsi_str})")
-        
-        # ป้องกันกรณีอินดิเคเตอร์คำนวณได้ค่าว่าง
         if pd.isna(last_rsi) or pd.isna(prev_rsi):
             continue
 
+        total_coins += 1
+        tier_num, tp_percent = get_coin_tier(symbol)
+        fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
+        price_format = f"${last_close_usd:,.6f}" if last_close_usd < 0.001 else (f"${last_close_usd:,.4f}" if last_close_usd < 1 else f"${last_close_usd:,.2f}")
+
         # -------------------------------------------------------------------------
-        # 2. คัดกรองสัญญาณเทรด (RSI Signals)
+        # เช็กความต่อเนื่องของเทรนด์ (Trend Continuity)
         # -------------------------------------------------------------------------
-        # 🟢 เงื่อนไขเข้าซื้อ (RSI ตัดลงต่ำกว่าหรือเท่ากับ 35)
-        if last_rsi <= 35 and prev_rsi > 35:
+        if pd.isna(last_ema200_usd) or pd.isna(last_ema50_usd):
+            coin_trend = "⚪ ข้อมูลไม่พอ"
+            trend_status = "ข้อมูลไม่เพียงพอกำหนดเทรนด์"
+        elif last_close_usd > last_ema50_usd and last_ema50_usd > last_ema200_usd:
+            coin_trend = "🟢 ขาขึ้นต่อเนื่องแข็งแกร่ง"
+            trend_status = "🟢 ขาขึ้นต่อเนื่องแข็งแกร่ง (Price > EMA50 > EMA200)"
+            bullish_count += 1
+        elif last_close_usd > last_ema200_usd:
+            coin_trend = "📈 โซนขาขึ้น"
+            trend_status = "📈 อยู่ในโซนขาขึ้น (เหนือเส้น EMA200)"
+            bullish_count += 1
+        elif last_close_usd < last_ema50_usd and last_ema50_usd < last_ema200_usd:
+            coin_trend = "🔴 ขาลงต่อเนื่องรุนแรง"
+            trend_status = "🔴 ขาลงต่อเนื่องรุนแรง (Price < EMA50 < EMA200)"
+        else:
+            coin_trend = "📉 โซนขาลง"
+            trend_status = "📉 อยู่ในโซนขาลง (ใต้เส้น EMA200)"
+
+        rsi_str = f"{last_rsi:.1f}" if not pd.isna(last_rsi) else "N/A"
+        
+        # บันทึกข้อมูลของทุกเหรียญไว้เผื่อใช้กรณี "ไม่มีสัญญาณ"
+        coin_summaries.append(f"• <b>{display_name}</b> (Tier {tier_num}): {price_format}\n  └ เทรนด์: {coin_trend} | RSI: {rsi_str}")
+
+        # -------------------------------------------------------------------------
+        # ตรวจสอบสัญญาณซื้อขาย
+        # -------------------------------------------------------------------------
+        
+        # 🟢 CASE BUY: RSI ดีดกลับจาก Oversold
+        if prev_rsi <= 35 and last_rsi > 35:
             is_bull_div = check_bullish_divergence(df)
-            
-            # กำหนดรูปแบบทศนิยมโซนซื้อขายตามราคาเหรียญ
-            fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
             buy_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 0.98, fmt)}"
-            take_profit = f"{format(last_close_usd * 1.05, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
-            stop_loss = f"{format(last_close_usd * 0.95, fmt)}"
+            take_profit = f"{format(last_close_usd * (1 + tp_percent), fmt)} (+{int(tp_percent*100)}%)"
+            stop_loss = f"{format(last_close_usd * 0.95, fmt)} (-5%)"
             
-            status_context = "📉 RSI Oversold"
-            if not pd.isna(last_ema200_usd):
-                if last_close_usd > last_ema200_usd:
-                    status_context += "\n+ ยืนเหนือเส้น EMA200 (ภาพใหญ่ยังเป็นแนวโน้มขาขึ้น)"
-                else:
-                    status_context += "\n- อยู่ใต้เส้น EMA200 (ภาพใหญ่ขาลง ระวังเน้นเล่นรอบสั้น)"
-                
-            if is_bull_div:
-                status_context += "\n🔥 พบบูลลิชไดเวอร์เจนท์ (Bullish Divergence) มีโอกาสกลับตัวสูง!"
-                
             msg = (
-                f"\n🟢 <b>[SIGNAL BUY] {display_name}</b>\n"
-                f"ราคาปัจจุบัน: {price_format} USD ({coin_trend})\n"
-                f"RSI (1h): {last_rsi:.2f}\n"
-                f"สถานะกราฟ: {status_context}\n"
-                f"📍 ช่วงราคาเข้าซื้อ: {buy_zone} USD\n"
+                f"🟢 <b>[SIGNAL BUY] {display_name}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💎 <b>กลุ่มเหรียญ:</b> Tier {tier_num}\n"
+                f"💰 <b>ราคาปัจจุบัน:</b> {price_format} USD\n"
+                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (ดีดกลับจาก Oversold 🔥)\n"
+                f"📈 <b>โครงสร้างเทรนด์:</b> {trend_status}\n"
+                f"⚡ <b>Divergence:</b> {'พบบูลลิชไดเวอร์เจนท์! 🚀' if is_bull_div else 'ไม่พบสัญญาณซ้อน'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>แผนการเทรด (ตาม Tier {tier_num}):</b>\n"
+                f"📍 โซนเข้าซื้อ: {buy_zone} USD\n"
                 f"🎯 เป้าขายทำกำไร: {take_profit} USD\n"
-                f"❌ จุดตัดขาดทุน: {stop_loss} USD\n"
-                f"--------------------------------"
+                f"❌ จุดตัดขาดทุน: {stop_loss} USD"
             )
-            signals.append(msg)
-            
-        # 🔴 เงื่อนไขเตือนขาย (RSI ตัดขึ้นสูงกว่าหรือเท่ากับ 65)
-        elif last_rsi >= 65 and prev_rsi < 65:
+            send_telegram_message(msg)
+            signal_sent_count += 1
+
+        # 🔴 CASE SELL: RSI เริ่มหักหัวลงจาก Overbought
+        elif prev_rsi >= 65 and last_rsi < 65:
             is_bear_div = check_bearish_divergence(df)
-            
-            fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
-            sell_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 1.02, fmt)}"
+            sell_zone = f"{format(last_close_usd * 1.02, fmt)} - {format(last_close_usd, fmt)}"
             re_entry_zone = f"{format(last_close_usd * 0.95, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
             trailing_stop = f"{format(last_close_usd * 0.97, fmt)}"
             
-            status_context = "⚠️ RSI Overbought (ซื้อมากเกินไป)"
-            if not pd.isna(last_ema200_usd):
-                if last_close_usd > last_ema200_usd:
-                    status_context += "\n+ ยืนเหนือเส้น EMA200 (โครงสร้างแข็งแกร่ง แต่อาจย่อตัวระยะสั้น)"
-                else:
-                    status_context += "\n- อยู่ใต้เส้น EMA200 (เด้งเพื่อลงต่อในภาพใหญ่ ระวังแรงเทขาย)"
-                
-            if is_bear_div:
-                status_context += "\n🚨 พบแบร์ริชไดเวอร์เจนท์ (Bearish Divergence) สัญญาณกลับตัวลงรุนแรง!"
-                
             msg = (
-                f"\n🔴 <b>[SIGNAL SELL] {display_name}</b>\n"
-                f"ราคาปัจจุบัน: {price_format} USD ({coin_trend})\n"
-                f"RSI (1h): {last_rsi:.2f}\n"
-                f"สถานะกราฟ: {status_context}\n"
-                f"📍 โซนแบ่งขายทำกำไร: {sell_zone} USD\n"
-                f"🎯 รอรับกลับเมื่อย่อตัว: {re_entry_zone} USD\n"
-                f"❌ หลุดจุดนี้ควรหนี (Trailing Stop): {trailing_stop} USD\n"
-                f"--------------------------------"
+                f"🔴 <b>[SIGNAL SELL] {display_name}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💎 <b>กลุ่มเหรียญ:</b> Tier {tier_num}\n"
+                f"💰 <b>ราคาปัจจุบัน:</b> {price_format} USD\n"
+                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (เริ่มย่อจาก Overbought ⚠️)\n"
+                f"📈 <b>โครงสร้างเทรนด์:</b> {trend_status}\n"
+                f"⚡ <b>Divergence:</b> {'พบแบร์ริชไดเวอร์เจนท์! 🚨' if is_bear_div else 'ไม่พบสัญญาณซ้อน'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>แผนการเก็บกำไร/ความเสี่ยง:</b>\n"
+                f"📍 โซนทยอยขาย: {sell_zone} USD\n"
+                f"🎯 รอรับกลับเมื่อย่อ: {re_entry_zone} USD\n"
+                f"❌ จุดล็อกกำไร/หนี (Trailing Stop): {trailing_stop} USD"
             )
-            signals.append(msg)
+            send_telegram_message(msg)
+            signal_sent_count += 1
 
     # -------------------------------------------------------------------------
-    # 3. จัดการแสดงผลข้อความใน Header และภาพรวมตลาด
+    # 💤 กรณีไม่มีสัญญาณเกิดขึ้นเลยในรอบนี้ -> ส่งสรุปภาพรวมตลาดและ Trend แทน
     # -------------------------------------------------------------------------
-    if total_coins > 0:
+    if signal_sent_count == 0 and total_coins > 0:
         bullish_ratio = bullish_count / total_coins
         if bullish_ratio >= 0.6:
-            market_overview = "📈 ขาขึ้นชัดเจน (Bullish)"
+            market_overview = "📈 ขาขึ้นแข็งแกร่ง (Bullish Market)"
         elif bullish_ratio <= 0.4:
-            market_overview = "📉 ขาลงรุนแรง (Bearish)"
+            market_overview = "📉 ขาลงชัดเจน (Bearish Market)"
         else:
-            market_overview = "↔️ ไซด์เวย์เลือกทาง (Sideways)"
+            market_overview = "↔️ ไซด์เวย์พักตัวเลือกทาง (Sideways Market)"
             
-        report_msg = f"📊 <b>[Crypto Screener Report] ภาพรวมตลาด: {market_overview}</b>\n"
-        report_msg += f"สัดส่วนเหรียญทรงขาขึ้น: {bullish_count} จากทั้งหมด {total_coins} ตัว\n"
-        report_msg += "=================================\n\n"
-        
-        report_msg += "<b>🧐 สรุปรายเหรียญล่าสุด:</b>\n"
-        report_msg += "\n".join(coin_summaries) + "\n\n"
-        report_msg += "=================================\n"
-        
-        if signals:
-            report_msg += "⚡ <b>สัญญาณเทรดเร่งด่วนในชั่วโมงนี้:</b>\n"
-            report_msg += "".join(signals)
-        else:
-            report_msg += "\nℹ️ <i>ในชั่วโมงนี้ไม่มีเหรียญใดเข้าเงื่อนไขสัญญาณซื้อ/ขาย</i>"
-            
-        send_telegram_message(report_msg)
-        print("Process complete: Updated layout report sent to Telegram.")
+        no_signal_msg = (
+            f"📊 <b>[Crypto Overview Report] ไม่พบสัญญาณเร่งด่วน</b>\n"
+            f"ℹ️ <i>ในชั่วโมงนี้ไม่มีเหรียญใดเข้าเงื่อนไขสัญญานซื้อ/ขายที่สมบูรณ์</i>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔮 <b>ภาพรวมตลาดปัจจุบัน:</b> {market_overview}\n"
+            f"📊 สัดส่วนเหรียญแนวโน้มขาขึ้น: {bullish_count} จากทั้งหมด {total_coins} ตัว\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🧐 <b>สถานะ Trend & RSI รายเหรียญ:</b>\n" + 
+            "\n".join(coin_summaries)
+        )
+        send_telegram_message(no_signal_msg)
+        print("No signal found. Market overview report sent.")
     else:
-        print("Process complete: No data found to analyze.")
+        print(f"Process complete. Sent {signal_sent_count} individual signals.")
 
 if __name__ == "__main__":
     screen_crypto()
