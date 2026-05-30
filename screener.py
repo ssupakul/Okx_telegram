@@ -167,7 +167,7 @@ def screen_crypto():
         # -------------------------------------------------------------------------
         
         # 🟢 CASE BUY: RSI ดีดกลับจาก Oversold
-        if prev_rsi <= 35 and last_rsi > 35:
+        if prev_rsi <= 32 and last_rsi > 32:
             is_bull_div = check_bullish_divergence(df)
             buy_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 0.98, fmt)}"
             take_profit = f"{format(last_close_usd * (1 + tp_percent), fmt)} (+{int(tp_percent*100)}%)"
@@ -191,7 +191,7 @@ def screen_crypto():
             signal_sent_count += 1
 
         # 🔴 CASE SELL: RSI เริ่มหักหัวลงจาก Overbought
-        elif prev_rsi >= 65 and last_rsi < 65:
+        elif prev_rsi >= 70 and last_rsi < 70:
             is_bear_div = check_bearish_divergence(df)
             sell_zone = f"{format(last_close_usd * 1.02, fmt)} - {format(last_close_usd, fmt)}"
             re_entry_zone = f"{format(last_close_usd * 0.95, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
