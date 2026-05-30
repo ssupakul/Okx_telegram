@@ -204,12 +204,13 @@ def screen_crypto():
         # ดึงชุดข้อมูลย้อนหลังสั้นๆ เพื่อตรวจสอบการฟื้นตัวของ RSI
         recent_rsi_df = df["RSI"].iloc[-CONFIG["rsi_recovery_lookback"]:]
         
-        # -------------------------------------------------------------------------
-        # สัญญาณฝั่งซื้อ (BUY SIGNAL)
-        # -------------------------------------------------------------------------
-        # เงื่อนไข: RSI ปัจจุบันตัดขึ้นมาเหนือค่า recovery แต่ในช่วง x แท่งก่อนหน้าเคยหลุดต่ำกว่า 32 (Oversold)
+        # สรุปตัวแปรสถานะ RSI ก่อนเข้าเงื่อนไขตรวจสอบสัญญาณ เพื่อความชัดเจน
         is_rsi_recovering = (last_rsi >= CONFIG["rsi_recovery_threshold"]) and (recent_rsi_df.min() <= 32)
-        
+        is_rsi_pulling_back = (last_rsi <= CONFIG["rsi_pullback_threshold"]) and (recent_rsi_df.max() >= 70)
+
+        # -------------------------------------------------------------------------
+        # ตรวจสอบสัญญาณซื้อขาย (SIGNAL CHECK)
+        # -------------------------------------------------------------------------
         if is_rsi_recovering:
             is_bull_div = check_bullish_divergence(df)
             
@@ -218,7 +219,6 @@ def screen_crypto():
             tp2_price = f"{format(last_close_usd * (1 + tp2_pct), fmt)} (+{int(tp2_pct*100)}%)"
             stop_loss = f"{format(last_close_usd * 0.95, fmt)} (-5%)"
             
-            # ประเมินว่านี่คือจังหวะที่ดีที่สุดหรือไม่จากโครงสร้างเทรนด์
             safety_rating = "⭐ ดีที่สุดและปลอดภัยสูง (ซื้อในเทรนด์ขาขึ้น)" if "🟢" in coin_trend or "📈" in coin_trend else "⚠️ ความเสี่ยงสูง (ซื้อสวนเทรนด์ขาลงต่อเนื่อง)"
 
             msg = (
@@ -240,12 +240,6 @@ def screen_crypto():
             send_telegram_message(msg)
             signal_sent_count += 1
 
-        # -------------------------------------------------------------------------
-        # สัญญาณฝั่งขาย (SELL SIGNAL)
-        # -------------------------------------------------------------------------
-        # เงื่อนไข: RSI ปัจจุบันตัดลงมาต่ำกว่าค่า pullback แต่ในช่วง x แท่งก่อนหน้าเคยสูงกว่า 70 (Overbought)
-        is_rsi_pulling_back = (last_rsi <= CONFIG["rsi_pullback_threshold"]) and (recent_rsi_df.max() >= 70)
-        
         elif is_rsi_pulling_back:
             is_bear_div = check_bearish_divergence(df)
             
@@ -272,7 +266,7 @@ def screen_crypto():
             signal_sent_count += 1
 
     # -------------------------------------------------------------------------
-    # กรณีไม่มีสัญญาณเร่งด่วนในรอบชั่วโมงนี้
+    # กรณีไม่มีสัญญาณเร่งด่วนในรอบชั่วโมงนี้ -> ส่งสรุปภาพรวมตลาด
     # -------------------------------------------------------------------------
     if signal_sent_count == 0 and total_coins > 0:
         bullish_ratio = bullish_count / total_coins
