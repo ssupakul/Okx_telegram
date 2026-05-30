@@ -206,7 +206,8 @@ def screen_crypto():
         
         # สรุปตัวแปรสถานะ RSI ก่อนเข้าเงื่อนไขตรวจสอบสัญญาณ เพื่อความชัดเจน
         is_rsi_recovering = (last_rsi >= CONFIG["rsi_recovery_threshold"]) and (recent_rsi_df.min() <= 32)
-        is_rsi_pulling_back = (last_rsi <= CONFIG["rsi_pullback_threshold"]) and (recent_rsi_df.max() >= 70)
+        # เช็กว่าแท่งก่อนหน้า (prev_rsi) หรือแท่งนี้เคยอยู่สูงกว่า 70 แล้วแท่งปัจจุบันเริ่มงอลงต่ำกว่าแท่งก่อนหน้า
+        is_rsi_pulling_back = (df["RSI"].iloc[-2] >= 70) and (last_rsi < df["RSI"].iloc[-2])
 
         # -------------------------------------------------------------------------
         # ตรวจสอบสัญญาณซื้อขาย (SIGNAL CHECK)
