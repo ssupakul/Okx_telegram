@@ -15,16 +15,33 @@ WATCHLIST = [
     "OP-USDT", "ADA-USDT", "SHIB-USDT", "DOGE-USDT"
 ]
 
-def get_coin_tier(symbol):
-    """ แยก Tier ของเหรียญเพื่อกำหนดเปอร์เซ็นต์ Take Profit """
+# คอนฟิกค่าพารามิเตอร์ตามที่กำหนด
+CONFIG = {
+    "rsi_recovery_threshold": 45,    # ระดับ RSI ที่มองว่าฟื้นตัวจากเขตล่าง
+    "rsi_pullback_threshold": 55,    # ระดับ RSI ที่มองว่าเริ่มย่อตัวจากเขตบน
+    "rsi_recovery_lookback": 5,      # จำนวนแท่งย้อนหลังที่เช็กว่าเคย Oversold/Overbought
+    "rsi_bull_div_max": 45,         # ค่า RSI ปัจจุบันสูงสุดที่ไม่เกินนี้ในการเกิด Bull Div
+    "rsi_bear_div_min": 55,         # ค่า RSI ปัจจุบันต่ำสุดที่ต้องเกินนี้ในการเกิด Bear Div
+    "lookback_bars": 15,            # ระยะเวลาหาจุดกลับตัวในอดีต
+    "lookback_skip_bars": 3          # จำนวนแท่งล่าสุดที่จะข้าม (ไม่นับรวมในกล่องอดีต)
+}
+
+def get_coin_tier_config(symbol):
+    """ 
+    แยก Tier ของเหรียญเพื่อกำหนดเปอร์เซ็นต์ Take Profit 2 ระยะ
+    ส่งกลับค่าเป็น: (Tier, TP1_percent, TP2_percent)
+    """
     tier_mapping = {
-        "BTC-USDT": (1, 0.08), "ETH-USDT": (1, 0.08),  # Tier 1: TP 8%
-        "BNB-USDT": (2, 0.12), "SOL-USDT": (2, 0.12), "XRP-USDT": (2, 0.12),
-        "NEAR-USDT": (2, 0.12), "OP-USDT": (2, 0.12), "ADA-USDT": (2, 0.12),
-        "EIGEN-USDT": (2, 0.12),  # Tier 2: TP 12%
-        "FLOKI-USDT": (3, 0.18), "SHIB-USDT": (3, 0.18), "DOGE-USDT": (3, 0.18)  # Tier 3: TP 18%
+        # Tier 1: TP1 +8%, TP2 +12%
+        "BTC-USDT": (1, 0.08, 0.12), "ETH-USDT": (1, 0.08, 0.12),  
+        # Tier 2: TP1 +15%, TP2 +20%
+        "BNB-USDT": (2, 0.15, 0.20), "SOL-USDT": (2, 0.15, 0.20), "XRP-USDT": (2, 0.15, 0.20),
+        "NEAR-USDT": (2, 0.15, 0.20), "OP-USDT": (2, 0.15, 0.20), "ADA-USDT": (2, 0.15, 0.20),
+        "EIGEN-USDT": (2, 0.15, 0.20),  
+        # Tier 3: TP1 +20%, TP2 +30%
+        "FLOKI-USDT": (3, 0.20, 0.30), "SHIB-USDT": (3, 0.20, 0.30), "DOGE-USDT": (3, 0.20, 0.30)  
     }
-    return tier_mapping.get(symbol, (2, 0.12))
+    return tier_mapping.get(symbol, (2, 0.15, 0.20)) # Default เป็น Tier 2
 
 def send_telegram_message(text_msg):
     """ ฟังก์ชันส่งข้อความไปยัง Telegram """
@@ -69,36 +86,61 @@ def get_historical_data_okx(symbol, interval="1h"):
             
         if not all_candles:
             return None
+            
         df = pd.DataFrame(all_candles, columns=["ts", "open", "high", "low", "close", "volume", "volCcy", "volCcyQuote", "confirm"])
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col])
-        return df.iloc[::-1].reset_index(drop=True)
+            
+        # กลับลำดับข้อมูล (เก่า -> ใหม่) เพื่อใช้คำนวณเทคนิคอลอินดิเคเตอร์
+        df = df.iloc[::-1].reset_index(drop=True)
+        return df
     except Exception as e:
         print(f"Exception fetching {symbol}: {e}")
         return None
 
 def check_bullish_divergence(df):
-    if len(df) < 20: return False
+    """ ตรวจสอบสัญญาณ Bullish Divergence ตามพารามิเตอร์ที่ปรับปรุงใหม่ """
+    if len(df) < CONFIG["lookback_bars"]: return False
+    
     current_close = df["close"].iloc[-1]
     current_rsi = df["RSI"].iloc[-1]
-    lookback_df = df.iloc[-15:-3]
+    
+    # ดึงกล่องข้อมูลในอดีตตามค่าที่ตั้งไว้ (ข้าม 3 แท่งล่าสุด ย้อนหลังไป 15 แท่ง)
+    start_idx = -CONFIG["lookback_bars"]
+    end_idx = -CONFIG["lookback_skip_bars"]
+    lookback_df = df.iloc[start_idx:end_idx]
+    
     lowest_price_idx = lookback_df["close"].idxmin()
     older_close = df["close"].loc[lowest_price_idx]
     older_rsi = df["RSI"].loc[lowest_price_idx]
-    return current_close < older_close and current_rsi > older_rsi and current_rsi < 45
+    
+    # เงื่อนไข: ราคาทำจุดต่ำสุดใหม่ แต่ RSI ยกตัวสูงขึ้น และ RSI ปัจจุบันต้องไม่เกินขอบบนที่ตั้งไว้
+    if current_close < older_close and current_rsi > older_rsi and current_rsi <= CONFIG["rsi_bull_div_max"]:
+        return True
+    return False
 
 def check_bearish_divergence(df):
-    if len(df) < 20: return False
+    """ ตรวจสอบสัญญาณ Bearish Divergence ตามพารามิเตอร์ที่ปรับปรุงใหม่ """
+    if len(df) < CONFIG["lookback_bars"]: return False
+    
     current_close = df["close"].iloc[-1]
     current_rsi = df["RSI"].iloc[-1]
-    lookback_df = df.iloc[-15:-3]
+    
+    start_idx = -CONFIG["lookback_bars"]
+    end_idx = -CONFIG["lookback_skip_bars"]
+    lookback_df = df.iloc[start_idx:end_idx]
+    
     highest_price_idx = lookback_df["close"].idxmax()
     older_close = df["close"].loc[highest_price_idx]
     older_rsi = df["RSI"].loc[highest_price_idx]
-    return current_close > older_close and current_rsi < older_rsi and current_rsi > 55
+    
+    # เงื่อนไข: ราคาทำจุดสูงสุดใหม่ แต่ RSI ลดต่ำลง และ RSI ปัจจุบันต้องมากกว่าขอบล่างที่ตั้งไว้
+    if current_close > older_close and current_rsi < older_rsi and current_rsi >= CONFIG["rsi_bear_div_min"]:
+        return True
+    return False
 
 def screen_crypto():
-    print("🚀 Starting Crypto Screener [Smart Report Mode]...")
+    print("🚀 Starting Crypto Screener [Advanced Strategy Mode]...")
     
     signal_sent_count = 0
     coin_summaries = []
@@ -116,85 +158,100 @@ def screen_crypto():
         df["EMA_200"] = ta.ema(df["close"], length=200)
         df["RSI"] = ta.rsi(df["close"], length=14)
         
-        if len(df) < 3:
+        if len(df) < 20 or "RSI" not in df.columns:
             continue
             
         last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
-        
         last_close_usd = last_row["close"]
         last_rsi = last_row["RSI"]
-        prev_rsi = prev_row["RSI"]
         last_ema50_usd = last_row["EMA_50"]
         last_ema200_usd = last_row["EMA_200"]
         
-        if pd.isna(last_rsi) or pd.isna(prev_rsi):
+        if pd.isna(last_rsi):
             continue
 
         total_coins += 1
-        tier_num, tp_percent = get_coin_tier(symbol)
-        fmt = ":,.6f" if last_close_usd < 0.001 else (":,.4f" if last_close_usd < 1 else ":,.2f")
+        tier_num, tp1_pct, tp2_pct = get_coin_tier_config(symbol)
+        
+        # จัดรูปแบบทศนิยมให้เหมาะสมกับราคา
+        fmt = ".6f" if last_close_usd < 0.001 else (".4f" if last_close_usd < 1 else ".2f")
         price_format = f"${last_close_usd:,.6f}" if last_close_usd < 0.001 else (f"${last_close_usd:,.4f}" if last_close_usd < 1 else f"${last_close_usd:,.2f}")
 
         # -------------------------------------------------------------------------
-        # เช็กความต่อเนื่องของเทรนด์ (Trend Continuity)
+        # เช็กโครงสร้างแนวโน้มแบบต่อเนื่อง (Trend Continuity)
         # -------------------------------------------------------------------------
         if pd.isna(last_ema200_usd) or pd.isna(last_ema50_usd):
             coin_trend = "⚪ ข้อมูลไม่พอ"
             trend_status = "ข้อมูลไม่เพียงพอกำหนดเทรนด์"
         elif last_close_usd > last_ema50_usd and last_ema50_usd > last_ema200_usd:
             coin_trend = "🟢 ขาขึ้นต่อเนื่องแข็งแกร่ง"
-            trend_status = "🟢 ขาขึ้นต่อเนื่องแข็งแกร่ง (Price > EMA50 > EMA200)"
+            trend_status = "🟢 ขาขึ้นต่อเนื่องแข็งแกร่ง (Price > EMA50 > EMA200) 🔥"
             bullish_count += 1
         elif last_close_usd > last_ema200_usd:
             coin_trend = "📈 โซนขาขึ้น"
-            trend_status = "📈 อยู่ในโซนขาขึ้น (เหนือเส้น EMA200)"
+            trend_status = "📈 โซนขาขึ้น (เหนือเส้น EMA200)"
             bullish_count += 1
         elif last_close_usd < last_ema50_usd and last_ema50_usd < last_ema200_usd:
             coin_trend = "🔴 ขาลงต่อเนื่องรุนแรง"
-            trend_status = "🔴 ขาลงต่อเนื่องรุนแรง (Price < EMA50 < EMA200)"
+            trend_status = "🔴 ขาลงต่อเนื่องรุนแรง (Price < EMA50 < EMA200) ⚠️"
         else:
             coin_trend = "📉 โซนขาลง"
-            trend_status = "📉 อยู่ในโซนขาลง (ใต้เส้น EMA200)"
+            trend_status = "📉 โซนขาลง (ใต้เส้น EMA200)"
 
-        rsi_str = f"{last_rsi:.1f}" if not pd.isna(last_rsi) else "N/A"
-        
-        # บันทึกข้อมูลของทุกเหรียญไว้เผื่อใช้กรณี "ไม่มีสัญญาณ"
+        rsi_str = f"{last_rsi:.1f}"
         coin_summaries.append(f"• <b>{display_name}</b> (Tier {tier_num}): {price_format}\n  └ เทรนด์: {coin_trend} | RSI: {rsi_str}")
 
-        # -------------------------------------------------------------------------
-        # ตรวจสอบสัญญาณซื้อขาย
-        # -------------------------------------------------------------------------
+        # ดึงชุดข้อมูลย้อนหลังสั้นๆ เพื่อตรวจสอบการฟื้นตัวของ RSI
+        recent_rsi_df = df["RSI"].iloc[-CONFIG["rsi_recovery_lookback"]:]
         
-        # 🟢 CASE BUY: RSI ดีดกลับจาก Oversold
-        if prev_rsi <= 32 and last_rsi > 32:
+        # -------------------------------------------------------------------------
+        # สัญญาณฝั่งซื้อ (BUY SIGNAL)
+        # -------------------------------------------------------------------------
+        # เงื่อนไข: RSI ปัจจุบันตัดขึ้นมาเหนือค่า recovery แต่ในช่วง x แท่งก่อนหน้าเคยหลุดต่ำกว่า 32 (Oversold)
+        is_rsi_recovering = (last_rsi >= CONFIG["rsi_recovery_threshold"]) and (recent_rsi_df.min() <= 32)
+        
+        if is_rsi_recovering:
             is_bull_div = check_bullish_divergence(df)
+            
             buy_zone = f"{format(last_close_usd, fmt)} - {format(last_close_usd * 0.98, fmt)}"
-            take_profit = f"{format(last_close_usd * (1 + tp_percent), fmt)} (+{int(tp_percent*100)}%)"
+            tp1_price = f"{format(last_close_usd * (1 + tp1_pct), fmt)} (+{int(tp1_pct*100)}%)"
+            tp2_price = f"{format(last_close_usd * (1 + tp2_pct), fmt)} (+{int(tp2_pct*100)}%)"
             stop_loss = f"{format(last_close_usd * 0.95, fmt)} (-5%)"
             
+            # ประเมินว่านี่คือจังหวะที่ดีที่สุดหรือไม่จากโครงสร้างเทรนด์
+            safety_rating = "⭐ ดีที่สุดและปลอดภัยสูง (ซื้อในเทรนด์ขาขึ้น)" if "🟢" in coin_trend or "📈" in coin_trend else "⚠️ ความเสี่ยงสูง (ซื้อสวนเทรนด์ขาลงต่อเนื่อง)"
+
             msg = (
                 f"🟢 <b>[SIGNAL BUY] {display_name}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💎 <b>กลุ่มเหรียญ:</b> Tier {tier_num}\n"
                 f"💰 <b>ราคาปัจจุบัน:</b> {price_format} USD\n"
-                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (ดีดกลับจาก Oversold 🔥)\n"
+                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (ฟื้นตัวจากเขตล่างสำเร็จ 📈)\n"
                 f"📈 <b>โครงสร้างเทรนด์:</b> {trend_status}\n"
+                f"🎯 <b>ระดับความปลอดภัย:</b> {safety_rating}\n"
                 f"⚡ <b>Divergence:</b> {'พบบูลลิชไดเวอร์เจนท์! 🚀' if is_bull_div else 'ไม่พบสัญญาณซ้อน'}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>แผนการเทรด (ตาม Tier {tier_num}):</b>\n"
+                f"🎯 <b>แผนการเทรดแบบแบ่งเป้า (Tier {tier_num}):</b>\n"
                 f"📍 โซนเข้าซื้อ: {buy_zone} USD\n"
-                f"🎯 เป้าขายทำกำไร: {take_profit} USD\n"
-                f"❌ จุดตัดขาดทุน: {stop_loss} USD"
+                f"💰 เป้าทำกำไรระยะสั้น (TP1): {tp1_price} USD\n"
+                f"🚀 เป้าทำกำไรลากเทรนด์ (TP2): {tp2_price} USD\n"
+                f"❌ จุดตัดขาดทุน (SL): {stop_loss} USD"
             )
             send_telegram_message(msg)
             signal_sent_count += 1
 
-        # 🔴 CASE SELL: RSI เริ่มหักหัวลงจาก Overbought
-        elif prev_rsi >= 70 and last_rsi < 70:
+        # -------------------------------------------------------------------------
+        # สัญญาณฝั่งขาย (SELL SIGNAL)
+        # -------------------------------------------------------------------------
+        # เงื่อนไข: RSI ปัจจุบันตัดลงมาต่ำกว่าค่า pullback แต่ในช่วง x แท่งก่อนหน้าเคยสูงกว่า 70 (Overbought)
+        is_rsi_pulling_back = (last_rsi <= CONFIG["rsi_pullback_threshold"]) and (recent_rsi_df.max() >= 70)
+        
+        elif is_rsi_pulling_back:
             is_bear_div = check_bearish_divergence(df)
+            
             sell_zone = f"{format(last_close_usd * 1.02, fmt)} - {format(last_close_usd, fmt)}"
-            re_entry_zone = f"{format(last_close_usd * 0.95, fmt)} (หรือ EMA50: {format(last_ema50_usd, fmt)})"
+            ema50_str = format(last_ema50_usd, fmt) if not pd.isna(last_ema50_usd) else "N/A"
+            re_entry_zone = f"{format(last_close_usd * 0.95, fmt)} (หรือแนวรับ EMA50: {ema50_str})"
             trailing_stop = f"{format(last_close_usd * 0.97, fmt)}"
             
             msg = (
@@ -202,20 +259,20 @@ def screen_crypto():
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💎 <b>กลุ่มเหรียญ:</b> Tier {tier_num}\n"
                 f"💰 <b>ราคาปัจจุบัน:</b> {price_format} USD\n"
-                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (เริ่มย่อจาก Overbought ⚠️)\n"
+                f"📊 <b>ค่า RSI (1h):</b> {last_rsi:.2f} (เริ่มย่อตัวจากเขตบน 📉)\n"
                 f"📈 <b>โครงสร้างเทรนด์:</b> {trend_status}\n"
                 f"⚡ <b>Divergence:</b> {'พบแบร์ริชไดเวอร์เจนท์! 🚨' if is_bear_div else 'ไม่พบสัญญาณซ้อน'}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>แผนการเก็บกำไร/ความเสี่ยง:</b>\n"
-                f"📍 โซนทยอยขาย: {sell_zone} USD\n"
-                f"🎯 รอรับกลับเมื่อย่อ: {re_entry_zone} USD\n"
+                f"🎯 <b>แผนการเก็บกำไร/บริหารความเสี่ยง:</b>\n"
+                f"📍 โซนทยอยขายล็อกกำไร: {sell_zone} USD\n"
+                f"🎯 รอรับกลับเมื่อราคาย่อตัว: {re_entry_zone} USD\n"
                 f"❌ จุดล็อกกำไร/หนี (Trailing Stop): {trailing_stop} USD"
             )
             send_telegram_message(msg)
             signal_sent_count += 1
 
     # -------------------------------------------------------------------------
-    # 💤 กรณีไม่มีสัญญาณเกิดขึ้นเลยในรอบนี้ -> ส่งสรุปภาพรวมตลาดและ Trend แทน
+    # กรณีไม่มีสัญญาณเร่งด่วนในรอบชั่วโมงนี้
     # -------------------------------------------------------------------------
     if signal_sent_count == 0 and total_coins > 0:
         bullish_ratio = bullish_count / total_coins
@@ -237,9 +294,9 @@ def screen_crypto():
             "\n".join(coin_summaries)
         )
         send_telegram_message(no_signal_msg)
-        print("No signal found. Market overview report sent.")
+        print("No urgent signal found. Market report sent successfully.")
     else:
-        print(f"Process complete. Sent {signal_sent_count} individual signals.")
+        print(f"Process complete. Sent {signal_sent_count} signals.")
 
 if __name__ == "__main__":
     screen_crypto()
