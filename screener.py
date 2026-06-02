@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# เพิ่ม TRX, AVAX, SUI เข้าไปใน Watchlist เรียบร้อยครับ
 COINS = [
     "BTC", "ETH", "BNB", "SOL", "XRP",
     "ADA", "FLOKI", "SHIB", "EIGEN", "OP", "DOGE", "NEAR",
@@ -31,7 +30,7 @@ COINS = [
 # ==========================================
 # Constants & Hyperparameters
 # ==========================================
-API_RATE_LIMIT_DELAY = 0.2  # OKX Public API ค่อนข้างเร็ว ปรับลดดีเลย์ลงได้เล็กน้อย
+API_RATE_LIMIT_DELAY = 0.35
 API_MAX_RETRIES = 3
 API_RETRY_DELAY = 2.0
 RSI_PERIOD = 14
@@ -70,12 +69,11 @@ TP_TIERS = {
     "small":  {"tp1": 0.18, "tp2": 0.25, "sl_buffer": 0.03},
 }
 
-# จัดกลุ่ม Tier ให้กับเหรียญที่เพิ่มเข้ามาใหม่
 COIN_TIER = {
     "BTC": "major", "ETH": "major",
     "BNB": "mid",   "SOL": "mid",   "XRP": "mid",
     "ADA": "mid",   "NEAR": "mid",  "OP": "mid",
-    "AVAX": "mid",  "SUI": "mid",   "TRX": "mid",       # จัดเป็นกลุ่ม Mid-cap มั่นคงสูง
+    "AVAX": "mid",  "SUI": "mid",   "TRX": "mid",
     "FLOKI": "small","SHIB": "small","EIGEN": "small","DOGE": "small",
 }
 
@@ -112,57 +110,55 @@ def send_telegram_messages(chunks: list) -> None:
 
 
 # ==========================================
-# OKX Data Fetching & Resampling
+# OKX Data Fetching & Resampling (Fixed Version)
 # ==========================================
 def get_historical_data(coin: str) -> pd.DataFrame | None:
-    """ดึงข้อมูล Candlesticks จาก OKX API (ใช้แท่ง 1H จำนวน 600 แท่งเพื่อนำมากลุ่มเป็น 4H)"""
     url = "https://www.okx.com/api/v5/market/candles"
     inst_id = f"{coin}-USDT"
     
-    # OKX ดึงได้สูงสุด 100 แท่งต่อครั้ง จึงใช้ตัวเลือก bar=1H ดึงมา 600 แท่ง เพื่อให้ได้แท่ง 4H ที่สมบูรณ์ > 140 แท่ง
     params = {
         "instId": inst_id,
         "bar": "1H",
-        "limit": "600" 
+        "limit": "1000"  # ดึงข้อมูลแท่ง 1H ให้ลึกขึ้นเพื่อความเสถียรตอนควบรวมแท่ง
+    }
+    
+    # ใส่ Headers ป้องกัน OKX ปฏิเสธการเชื่อมต่อ (Anti-Scraping / Bot detection)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     for attempt in range(1, API_MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, params=params, timeout=15)
+            resp = requests.get(url, params=params, headers=headers, timeout=15)
             data = resp.json()
 
             if data.get("code") == "0" and "data" in data:
                 raw_candles = data["data"]
                 if not raw_candles:
-                    logger.warning(f"{coin}: OKX ไม่มีข้อมูลกลับมา")
+                    logger.warning(f"{coin}: OKX ไม่มีข้อมูลตอบกลับใน Array")
                     return None
                 
-                # OKX Data Format: [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
                 columns = ["ts", "open", "high", "low", "close", "vol", "volCcy", "volCcyQuote", "confirm"]
                 df_raw = pd.DataFrame(raw_candles, columns=columns)
                 
-                # แปลงชนิดข้อมูลตัวเลข
                 for col in ["open", "high", "low", "close", "volCcyQuote"]:
                     df_raw[col] = pd.to_numeric(df_raw[col], errors="coerce")
                 
-                # OKX ใช้หน่วย Timestamp เป็น ms และส่งค่าเรียงจาก ปัจจุบัน -> อดีต จึงต้องกลับด้านข้อมูล (sort_index)
                 df_raw["time"] = pd.to_datetime(df_raw["ts"].astype(float), unit="ms")
                 df_raw.set_index("time", inplace=True)
                 df_raw.sort_index(ascending=True, inplace=True)
                 
-                # ทำการยุบแท่งเวลา (Resample) จาก 1H เป็น 4H
-                # ใช้ closed='left', label='left' เพื่อให้ค่าสอดคล้องกับเวลาเริ่มต้นเปิดแท่งเทียนสากล
-                df_4h = df_raw.resample("4h", closed="left", label="left").agg(
+                # ปรับปรุง Logic การ Resample ให้มีความยืดหยุ่นและอิงตามเวลาสากลที่แน่นอน
+                df_4h = df_raw.resample("4h", closed="left", label="left", origin="epoch").agg(
                     {
                         "open": "first",
                         "high": "max",
                         "low": "min",
                         "close": "last",
-                        "volCcyQuote": "sum", # ใช้ปริมาณ Volume หน่วยเป็น USD (Quote Currency) เหมือนเดิม
+                        "volCcyQuote": "sum",
                     }
                 ).dropna()
                 
-                # เปลี่ยนชื่อคอลัมน์ Volume ให้แมตช์กับฟังก์ชันเดิมในระบบของคุณ
                 df_4h.rename(columns={"volCcyQuote": "volumeto"}, inplace=True)
 
                 logger.info(f"{coin}: OKX ดึงข้อมูลและแปลงเป็น 4H สำเร็จ ({len(df_4h)} แท่ง)")
@@ -389,7 +385,6 @@ def find_order_blocks(df: pd.DataFrame, lookback: int = OB_LOOKBACK) -> dict:
     recent_high = past_df["high"].max()
     recent_low = past_df["low"].min()
 
-    # 1. Bullish Order Block (BOS Breakout)
     if curr_close > recent_high and curr_body > (avg_body * OB_IMBALANCE_RATIO):
         for i in range(2, min(15, len(df))):
             idx = -i
@@ -404,7 +399,6 @@ def find_order_blocks(df: pd.DataFrame, lookback: int = OB_LOOKBACK) -> dict:
                     ob_result["bullish_ob_price"] = p_low
                     break
 
-    # 2. Bearish Order Block (BOS Breakdown)
     elif curr_close < recent_low and curr_body > (avg_body * OB_IMBALANCE_RATIO):
         for i in range(2, min(15, len(df))):
             idx = -i
@@ -475,9 +469,9 @@ def scan_market():
         df = get_historical_data(coin)
         time.sleep(API_RATE_LIMIT_DELAY)
 
-        # OKX ข้อมูลแบบ 4H หลังจากถูก Resample แล้วต้องการให้ได้ค่าอินดิเคเตอร์ที่เสถียร 
-        if df is None or len(df) < 140: 
-            logger.warning(f"{coin}: ข้อมูลแท่ง 4H หลังรวมโครงสร้างไม่พอ – ข้ามเหรียญนี้")
+        # ปรับเกณฑ์ขั้นต่ำลงมาที่ 60 แท่ง (เพียงพอสำหรับการหา EMA 50 และ RSI 14)
+        if df is None or len(df) < 60: 
+            logger.warning(f"{coin}: ข้อมูลแท่ง 4H ไม่พอคำนวณ (มีเพียง {len(df) if df is not None else 0} แท่ง) – ข้ามเหรียญนี้")
             continue
 
         df = calculate_indicators(df)
@@ -505,7 +499,6 @@ def scan_market():
 
         signal_type = ""
 
-        # --- CASE ขาขึ้น (Above EMA 200) ---
         if current_price > ema_200:
             coin_trend = "🟢 ขาขึ้น (Above EMA 200)"
             bullish_coins += 1
@@ -525,7 +518,6 @@ def scan_market():
             if ob_info["has_bullish_ob"] and not signal_type:
                 signal_type = f"Bullish OB Breakout (SMC) 🚀{vol_tag}"
 
-        # --- CASE ขาลง (Below EMA 200) ---
         else:
             coin_trend = "🔴 ขาลง (Below EMA 200)"
             bearish_coins += 1
@@ -730,7 +722,7 @@ def build_messages(buy_list: list, sell_list: list, market_summary: str) -> list
 # Main Execution Block
 # ==========================================
 if __name__ == "__main__":
-    logger.info("เริ่มต้นใช้งาน OKX Crypto Screener 4H (SMC Order Block + Rebound v5)...")
+    logger.info("เริ่มต้นใช้งาน OKX Crypto Screener 4H (SMC Order Block + Rebound v5.1)...")
 
     buy_list, sell_list, market_summary = scan_market()
     logger.info(f"สแกนระบบเสร็จสมบูรณ์ → พบสัญญาณซื้อ: {len(buy_list)} ตัว | พบสัญญาณขาย/ระวัง: {len(sell_list)} ตัว")
